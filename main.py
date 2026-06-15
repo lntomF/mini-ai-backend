@@ -36,6 +36,9 @@ class ClassifyRequest(BaseModel):
 class AgentRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
+class StudyPlanRequest(BaseModel):
+    goal: str = Field(..., min_length=1)
+    days: int = Field(..., ge=1, le=30)
 
 @app.get("/")
 def home():
@@ -219,6 +222,37 @@ ALLOWED_OPERATORS = {
     ast.USub: operator.neg,
 }
 
+@app.post("/study-plan")
+def create_study_plan(request: StudyPlanRequest):
+    check_api_key()
+
+    try:
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a practical AI internship coach. Create clear and actionable study plans."
+                },
+                {
+                    "role": "user",
+                    "content": f"请为目标：{request.goal}，制定一个 {request.days} 天的学习计划。要求每天都有具体任务和产出物。"
+                }
+            ],
+            stream=False,
+        )
+
+        return {
+            "goal": request.goal,
+            "days": request.days,
+            "plan": response.choices[0].message.content
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Study plan generation failed: {str(e)}"
+        )
 
 @app.post("/agent")
 def run_agent(request: AgentRequest):
