@@ -1,23 +1,34 @@
-# Mini AI Backend API
+# Mini AI Backend with DeepSeek
 
-This is my first FastAPI backend project for AI application development.
+A FastAPI-based LLM backend project integrating DeepSeek API for chat, structured output, and tool-using AI agent workflows.
 
 ## Features
 
-- Health check API
-- Text analysis API
-- Word count
-- Character count
+- FastAPI REST API
+- DeepSeek Chat API integration
+- Structured JSON output
+- Intent classification
+- Tool Calling Agent
+- Safe calculator tool
+- Word counter tool
+- Environment-based API key configuration
+- Error handling
 
 ## Tech Stack
 
 - Python
 - FastAPI
+- DeepSeek API
+- OpenAI-compatible SDK
+- Pydantic
 - Uvicorn
 
-## How to Run
+## Project Structure
 
-```bash
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
+```text
+mini-ai-backend/
+├── main.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
