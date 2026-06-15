@@ -5,9 +5,11 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from openai import OpenAI
 from pydantic import BaseModel, Field
+import uuid
+from pathlib import Path
 
 load_dotenv()
 
@@ -20,6 +22,12 @@ client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com",
 )
+
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 80
 
 class TextRequest(BaseModel):
     text: str = Field(..., min_length=1)
@@ -49,7 +57,8 @@ def home():
             "POST /analyze",
             "POST /chat",
             "POST /classify",
-            "POST /agent"
+            "POST /agent",
+            "POST /upload-document"
         ]
     }
 
@@ -65,6 +74,55 @@ def analyze_text(request: TextRequest):
         "summary": f"This text has {len(words)} words and {len(request.text)} characters."
     }
 
+
+@app.post("/upload-document")
+async def upload_document(file: UploadFile = File(...)):
+    allowed_extensions = [".txt", ".md"]
+
+    file_suffix = Path(file.filename).suffix.lower()
+
+    if file_suffix not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail="Only .txt and .md files are supported for now."
+        )
+
+    doc_id = str(uuid.uuid4())
+    saved_filename = f"{doc_id}_{file.filename}"
+    file_path = UPLOAD_DIR / saved_filename
+
+    try:
+        content_bytes = await file.read()
+
+        try:
+            text = content_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail="File must be encoded in UTF-8."
+            )
+
+        file_path.write_text(text, encoding="utf-8")
+
+        chunks = chunk_text(text)
+
+        return {
+            "doc_id": doc_id,
+            "filename": file.filename,
+            "saved_path": str(file_path),
+            "char_count": len(text),
+            "chunk_count": len(chunks),
+            "chunks_preview": chunks[:3]
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document upload failed: {str(e)}"
+        )
 
 @app.post("/chat")
 def chat(request: ChatRequest):
@@ -358,7 +416,32 @@ def check_api_key():
             status_code=500,
             detail="DEEPSEEK_API_KEY is missing. Please set it in your .env file."
         )
+    
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
+    """
+    Split long text into overlapping chunks.
+    This is the first step of a RAG pipeline.
+    """
 
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        start = end - overlap
+
+        if start < 0:
+            start = 0
+
+        if start >= len(text):
+            break
+
+    return chunks
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]):
     if tool_name == "calculator":
