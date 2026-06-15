@@ -28,6 +28,8 @@ client = OpenAI(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+VECTOR_DISTANCE_THRESHOLD = 1.5
+
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 80
 DOCUMENT_STORE = {}
@@ -97,7 +99,6 @@ def home():
         ]
     }
 
-
 @app.post("/analyze")
 def analyze_text(request: TextRequest):
     words = request.text.split()
@@ -108,7 +109,6 @@ def analyze_text(request: TextRequest):
         "char_count": len(request.text),
         "summary": f"This text has {len(words)} words and {len(request.text)} characters."
     }
-
 
 @app.post("/upload-document")
 async def upload_document(file: UploadFile = File(...)):
@@ -777,7 +777,12 @@ def check_api_key():
             detail="DEEPSEEK_API_KEY is missing. Please set it in your .env file."
         )
 
-def vector_search(query: str, top_k: int = 3, doc_id: str | None = None):
+def vector_search(
+    query: str,
+    top_k: int = 3,
+    doc_id: str | None = None,
+    distance_threshold: float = VECTOR_DISTANCE_THRESHOLD
+):
     query_embedding = embedding_model.encode([query]).tolist()
 
     where_filter = None
@@ -799,6 +804,9 @@ def vector_search(query: str, top_k: int = 3, doc_id: str | None = None):
     search_results = []
 
     for document, metadata, distance in zip(documents, metadatas, distances):
+        if distance > distance_threshold:
+            continue
+
         search_results.append({
             "doc_id": metadata.get("doc_id"),
             "filename": metadata.get("filename"),
@@ -911,7 +919,6 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]):
         detail=f"Unknown tool: {tool_name}"
     )
 
-
 def safe_calculate(expression: str):
     """
     Safer calculator.
@@ -951,7 +958,6 @@ def safe_calculate(expression: str):
             status_code=400,
             detail=f"Invalid math expression: {str(e)}"
         )
-
 
 def eval_ast_node(node):
     if isinstance(node, ast.Constant):
