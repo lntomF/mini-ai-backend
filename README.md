@@ -1,53 +1,123 @@
-# 迷你 AI 后端练手项目 (FastAPI + DeepSeek)
+# 迷你 AI 后端练手项目
 
-这是我最近搞的一个练手小项目，主要是用 Python 的 FastAPI 框架加上 DeepSeek 的接口，搭一个很基础的 AI 后端。用来学习大模型是怎么做对话、意图分类以及到底怎么跑调用外部工具（Agent智能体）的。
+这是一个基于 FastAPI + DeepSeek + ChromaDB 的小型 AI 后端示例。项目把聊天、意图分类、文档问答、向量检索、学习计划生成和工具调用都放在一个 `main.py` 里，是一个最小可用的 AI 服务。
 
-## 实现了啥功能？
+## 功能
 
-- **基础聊天 (`/chat`)**：接了 DeepSeek 接口，常规的聊天请求。
-- **意图区分 (`/classify`)**：约束大模型强行吐出标准 JSON 格式，用来判断你说的话到底是闲聊、问代码、算数学还是其他。
-- **智能体 Agent (`/agent`)**：这个最费脑子但是挺好玩！自己随便写了个计算器工具和数字数工具，然后丢给大模型。AI 遇到复杂的数学题或者查字数要求时，会自己决定调我写的工具算出来再回答（防止大模型数学一本正经胡说八道）。
-- 附带一个没用 AI 的本地文字分析接口 (`/analyze`)。
-- 添加Study-plan(`/study-plan`)接口，给用户提供学习计划建议。
+## 环境要求
 
-## 环境依赖
+## 安装
 
-1. **装依赖**  
-   别忘了先装 Python。然后在终端里运行：
+```bash
+pip install -r requirements.txt
+```
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+## 配置环境变量
 
-2. **配置一把 API Key**  
-   去 DeepSeek 官网注册申请一个 Key。在项目文件夹下新建一个 `.env` 文件（注意别不小心传到 Github 上了！），里面写：
+在项目根目录创建 `.env` 文件：
 
-   ```env
-   DEEPSEEK_API_KEY=换成你自己的key
-   DEEPSEEK_MODEL=deepseek-chat
-   ```
+```env
+DEEPSEEK_API_KEY=你的key
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
 
-3. **启动服务器**  
-   在终端敲：
+`DEEPSEEK_MODEL` 不写时，默认就是 `deepseek-v4-flash`。
 
-   ```bash
-   uvicorn main:app --reload
-   ```
+## 启动服务
 
-   跑起来后，去浏览器里打开 `http://127.0.0.1:8000/docs` ，就能看到 FastAPI 自带的接口调试文档页面了，可以直接在里面点开测试！
+```bash
+uvicorn main:app --reload
+```
 
-## 文件结构大概长这样
+启动后可以直接访问：
+
+## 接口速览
+
+### 1. `GET /`
+
+返回服务状态和已开放接口列表。
+
+### 2. `POST /analyze`
+
+请求体：
+
+```json
+{
+   "text": "Hello world"
+}
+```
+
+### 3. `POST /chat`
+
+请求体：
+
+```json
+{
+   "message": "你好，帮我介绍一下这个项目"
+}
+```
+
+### 4. `POST /classify`
+
+输入一段话，返回类似下面的 JSON：
+
+```json
+{
+   "intent": "qa",
+   "confidence": 0.92,
+   "reason": "The user is asking a question."
+}
+```
+
+### 5. `POST /agent`
+
+支持两种工具：
+
+### 6. `POST /upload-document`
+
+只支持 `.txt` 和 `.md` 文件。上传后会：
+
+### 7. `POST /search-document`
+
+对上传文档做关键词检索。
+
+### 8. `POST /ask-document`
+
+先关键词召回，再交给 DeepSeek 做基于上下文的问答。
+
+### 9. `POST /vector-search-document`
+
+用向量相似度做语义检索。
+
+### 10. `POST /ask-document-vector`
+
+先做向量召回，再让模型基于召回内容回答问题。
+
+### 11. `POST /study-plan`
+
+请求体：
+
+```json
+{
+   "goal": "学习 FastAPI",
+   "days": 7
+}
+```
+
+## 目录结构
 
 ```text
 mini-ai-backend/
-├── main.py            # 全部的心血代码都在这一个文件里
-├── requirements.txt   # 用到的第三方包
-├── .env.example       # 环境变量参考
-└── README.md          # 就是你正在看的这个
+├── main.py
+├── requirements.txt
+├── README.md
+├── chroma_db/
+└── uploads/
 ```
 
-## 踩坑和笔记
+## 说明
 
-- 让大模型自己算数学真的不准，接到本地计算器后就稳了。这里学到一个高端操作：计算器没敢直接用 `eval()`（看网上说如果被传系统命令会被黑），而是抄了一手 `ast` 语法树安全解析。
-- `Pydantic` 用来写接口请求的模型挺香的，不用自己天天写 `if x == ""` 来判断用户输入非法数据了。
-- `.env` 读取不到 Key 或者没写对的时候，加了点拦截拦截，免得抛出一堆看不懂的红字报错。
+## 小结
+
+这个项目是把几个常见 AI 后端能力拼在一起：聊天、分类、工具调用、文档 RAG、向量检索和学习计划生成。
+暂时先学到这几个功能，后续可以继续扩展更多能力，比如多模态、个性化等。-2026.6.15
