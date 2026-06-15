@@ -1,34 +1,52 @@
-# Mini AI Backend with DeepSeek
+# 迷你 AI 后端练手项目 (FastAPI + DeepSeek)
 
-A FastAPI-based LLM backend project integrating DeepSeek API for chat, structured output, and tool-using AI agent workflows.
+这是我最近搞的一个练手小项目，主要是用 Python 的 FastAPI 框架加上 DeepSeek 的接口，搭一个很基础的 AI 后端。用来学习大模型是怎么做对话、意图分类以及到底怎么跑调用外部工具（Agent智能体）的。
 
-## Features
+## 实现了啥功能？
 
-- FastAPI REST API
-- DeepSeek Chat API integration
-- Structured JSON output
-- Intent classification
-- Tool Calling Agent
-- Safe calculator tool
-- Word counter tool
-- Environment-based API key configuration
-- Error handling
+- **基础聊天 (`/chat`)**：接了 DeepSeek 接口，常规的聊天请求。
+- **意图区分 (`/classify`)**：约束大模型强行吐出标准 JSON 格式，用来判断你说的话到底是闲聊、问代码、算数学还是其他。
+- **智能体 Agent (`/agent`)**：这个最费脑子但是挺好玩！自己随便写了个计算器工具和数字数工具，然后丢给大模型。AI 遇到复杂的数学题或者查字数要求时，会自己决定调我写的工具算出来再回答（防止大模型数学一本正经胡说八道）。
+- 附带一个没用 AI 的本地文字分析接口 (`/analyze`)。
 
-## Tech Stack
+## 环境依赖
 
-- Python
-- FastAPI
-- DeepSeek API
-- OpenAI-compatible SDK
-- Pydantic
-- Uvicorn
+1. **装依赖**  
+   别忘了先装 Python。然后在终端里运行：
 
-## Project Structure
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **配置一把 API Key**  
+   去 DeepSeek 官网注册申请一个 Key。在项目文件夹下新建一个 `.env` 文件（注意别不小心传到 Github 上了！），里面写：
+
+   ```env
+   DEEPSEEK_API_KEY=换成你自己的key
+   DEEPSEEK_MODEL=deepseek-chat
+   ```
+
+3. **启动服务器**  
+   在终端敲：
+
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+   跑起来后，去浏览器里打开 `http://127.0.0.1:8000/docs` ，就能看到 FastAPI 自带的接口调试文档页面了，可以直接在里面点开测试！
+
+## 文件结构大概长这样
 
 ```text
 mini-ai-backend/
-├── main.py
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+├── main.py            # 全部的心血代码都在这一个文件里
+├── requirements.txt   # 用到的第三方包
+├── .env.example       # 环境变量参考
+└── README.md          # 就是你正在看的这个
+```
+
+## 踩坑和笔记
+
+- 让大模型自己算数学真的不准，接到本地计算器后就稳了。这里学到一个高端操作：计算器没敢直接用 `eval()`（看网上说如果被传系统命令会被黑），而是抄了一手 `ast` 语法树安全解析。
+- `Pydantic` 用来写接口请求的模型挺香的，不用自己天天写 `if x == ""` 来判断用户输入非法数据了。
+- `.env` 读取不到 Key 或者没写对的时候，加了点拦截拦截，免得抛出一堆看不懂的红字报错。

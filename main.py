@@ -21,7 +21,6 @@ client = OpenAI(
     base_url="https://api.deepseek.com",
 )
 
-
 class TextRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
