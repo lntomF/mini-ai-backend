@@ -2,6 +2,7 @@ import ast
 import json
 import operator
 import os
+import re
 from typing import Any
 
 from dotenv import load_dotenv
@@ -28,18 +29,22 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 80
+DOCUMENT_STORE = {}
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were",
+    "who", "what", "when", "where", "why", "how",
+    "of", "to", "in", "on", "for", "with", "and", "or",
+    "does", "do", "did", "be", "by", "from"
+}
 
 class TextRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
-
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
-
 class ClassifyRequest(BaseModel):
     message: str = Field(..., min_length=1)
-
 
 class AgentRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -47,6 +52,16 @@ class AgentRequest(BaseModel):
 class StudyPlanRequest(BaseModel):
     goal: str = Field(..., min_length=1)
     days: int = Field(..., ge=1, le=30)
+
+class SearchDocumentRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    doc_id: str | None = None
+    top_k: int = Field(default=3, ge=1, le=10)
+
+class AskDocumentRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    doc_id: str | None = None
+    top_k: int = Field(default=3, ge=1, le=10)
 
 @app.get("/")
 def home():
@@ -106,6 +121,13 @@ async def upload_document(file: UploadFile = File(...)):
 
         chunks = chunk_text(text)
 
+        DOCUMENT_STORE[doc_id] = {
+        "filename": file.filename,
+        "saved_path": str(file_path),
+        "text": text,
+        "chunks": chunks
+        }
+
         return {
             "doc_id": doc_id,
             "filename": file.filename,
@@ -122,6 +144,128 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500,
             detail=f"Document upload failed: {str(e)}"
+        )
+
+@app.post("/ask-document")
+def ask_document(request: AskDocumentRequest):
+    check_api_key()
+
+    if not DOCUMENT_STORE:
+        raise HTTPException(
+            status_code=400,
+            detail="No documents uploaded yet."
+        )
+
+    search_targets = {}
+
+    if request.doc_id:
+        if request.doc_id not in DOCUMENT_STORE:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found."
+            )
+        search_targets[request.doc_id] = DOCUMENT_STORE[request.doc_id]
+    else:
+        search_targets = DOCUMENT_STORE
+
+    all_results = []
+
+    for doc_id, doc in search_targets.items():
+        results = keyword_search(
+            query=request.question,
+            chunks=doc["chunks"],
+            top_k=request.top_k
+        )
+
+        for result in results:
+            all_results.append({
+            "doc_id": doc_id,
+            "filename": doc["filename"],
+            "chunk_index": result["chunk_index"],
+            "score": result["score"],
+            "matched_words": result["matched_words"],
+            "text": result["text"]
+            })
+
+    all_results.sort(key=lambda item: item["score"], reverse=True)
+    top_results = all_results[:request.top_k]
+
+    if not top_results:
+        return {
+            "question": request.question,
+            "answer": "I don't know based on the uploaded documents.",
+            "citations": [],
+            "retrieved_chunks": []
+        }
+
+    context_blocks = []
+
+    for index, result in enumerate(top_results, start=1):
+        context_blocks.append(
+            f"[Source {index}] "
+            f"filename: {result['filename']}, "
+            f"chunk_index: {result['chunk_index']}\n"
+            f"{result['text']}"
+        )
+
+    context = "\n\n".join(context_blocks)
+
+    system_prompt = """
+You are a document question-answering assistant.
+
+Answer the user's question using only the provided context.
+
+Rules:
+- If the answer is not in the context, say: "I don't know based on the uploaded documents."
+- Do not use outside knowledge.
+- Keep the answer clear and concise.
+- Include citation markers like [Source 1] when using information from the context.
+"""
+
+    user_prompt = f"""
+Question:
+{request.question}
+
+Context:
+{context}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            stream=False,
+        )
+
+        return {
+            "question": request.question,
+            "answer": response.choices[0].message.content,
+            "citations": [
+                {
+                    "source": f"Source {index}",
+                    "doc_id": result["doc_id"],
+                    "filename": result["filename"],
+                    "chunk_index": result["chunk_index"],
+                    "score": result["score"]
+                }
+                for index, result in enumerate(top_results, start=1)
+            ],
+            "retrieved_chunks": top_results
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document QA failed: {str(e)}"
         )
 
 @app.post("/chat")
@@ -312,6 +456,54 @@ def create_study_plan(request: StudyPlanRequest):
             detail=f"Study plan generation failed: {str(e)}"
         )
 
+
+@app.post("/search-document")
+def search_document(request: SearchDocumentRequest):
+    if not DOCUMENT_STORE:
+        raise HTTPException(
+            status_code=400,
+            detail="No documents uploaded yet."
+        )
+
+    search_targets = {}
+
+    if request.doc_id:
+        if request.doc_id not in DOCUMENT_STORE:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found."
+            )
+        search_targets[request.doc_id] = DOCUMENT_STORE[request.doc_id]
+    else:
+        search_targets = DOCUMENT_STORE
+
+    all_results = []
+
+    for doc_id, doc in search_targets.items():
+        results = keyword_search(
+            query=request.query,
+            chunks=doc["chunks"],
+            top_k=request.top_k
+        )
+
+        for result in results:
+            all_results.append({
+            "doc_id": doc_id,
+            "filename": doc["filename"],
+            "chunk_index": result["chunk_index"],
+            "score": result["score"],
+            "matched_words": result["matched_words"],
+            "text": result["text"]
+            })
+    all_results.sort(key=lambda item: item["score"], reverse=True)
+
+    return {
+        "query": request.query,
+        "top_k": request.top_k,
+        "result_count": len(all_results[:request.top_k]),
+        "results": all_results[:request.top_k]
+    }
+
 @app.post("/agent")
 def run_agent(request: AgentRequest):
     check_api_key()
@@ -442,6 +634,48 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
             break
 
     return chunks
+
+def keyword_search(query: str, chunks: list[str], top_k: int = 3):
+    """
+    Simple keyword-based retrieval.
+
+    This version removes common stopwords so that words like
+    'is', 'the', 'who' do not create false matches.
+    """
+
+    query_words = re.findall(r"\b\w+\b", query.lower())
+
+    important_words = [
+        word for word in query_words
+        if word not in STOPWORDS and len(word) > 2
+    ]
+
+    if not important_words:
+        return []
+
+    results = []
+
+    for index, chunk in enumerate(chunks):
+        chunk_lower = chunk.lower()
+        score = 0
+        matched_words = []
+
+        for word in important_words:
+            if word in chunk_lower:
+                score += 1
+                matched_words.append(word)
+
+        if score > 0:
+            results.append({
+                "chunk_index": index,
+                "score": score,
+                "matched_words": matched_words,
+                "text": chunk
+            })
+
+    results.sort(key=lambda item: item["score"], reverse=True)
+
+    return results[:top_k]
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]):
     if tool_name == "calculator":
