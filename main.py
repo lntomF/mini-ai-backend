@@ -4,7 +4,8 @@ import operator
 import os
 import re
 from typing import Any
-
+import chromadb
+from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from openai import OpenAI
@@ -34,8 +35,22 @@ STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were",
     "who", "what", "when", "where", "why", "how",
     "of", "to", "in", "on", "for", "with", "and", "or",
-    "does", "do", "did", "be", "by", "from"
+    "does", "do", "did", "be", "by", "from",
+    "can", "could", "would", "should", "may", "might"
 }
+CHROMA_DIR = Path("chroma_db")
+CHROMA_COLLECTION_NAME = "rag_documents"
+
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+
+vector_collection = chroma_client.get_or_create_collection(
+    name=CHROMA_COLLECTION_NAME
+)
+
 
 class TextRequest(BaseModel):
     text: str = Field(..., min_length=1)
@@ -60,6 +75,11 @@ class SearchDocumentRequest(BaseModel):
 
 class AskDocumentRequest(BaseModel):
     question: str = Field(..., min_length=1)
+    doc_id: str | None = None
+    top_k: int = Field(default=3, ge=1, le=10)
+
+class VectorSearchDocumentRequest(BaseModel):
+    query: str = Field(..., min_length=1)
     doc_id: str | None = None
     top_k: int = Field(default=3, ge=1, le=10)
 
@@ -127,6 +147,30 @@ async def upload_document(file: UploadFile = File(...)):
         "text": text,
         "chunks": chunks
         }
+        
+        chunk_ids = [
+            f"{doc_id}_{index}"
+            for index in range(len(chunks))
+        ]
+
+        chunk_metadatas = [
+            {
+                "doc_id": doc_id,
+                "filename": file.filename,
+                "chunk_index": index
+            }
+            for index in range(len(chunks))
+        ]
+
+        chunk_embeddings = embedding_model.encode(chunks).tolist()
+
+        vector_collection.add(
+            ids=chunk_ids,
+            documents=chunks,
+            metadatas=chunk_metadatas,
+            embeddings=chunk_embeddings
+        )
+
 
         return {
             "doc_id": doc_id,
@@ -268,6 +312,33 @@ Context:
             detail=f"Document QA failed: {str(e)}"
         )
 
+@app.post("/vector-search-document")
+def vector_search_document(request: VectorSearchDocumentRequest):
+    if vector_collection.count() == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No document embeddings found. Please upload a document first."
+        )
+
+    if request.doc_id and request.doc_id not in DOCUMENT_STORE:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found."
+        )
+
+    results = vector_search(
+        query=request.query,
+        top_k=request.top_k,
+        doc_id=request.doc_id
+    )
+
+    return {
+        "query": request.query,
+        "top_k": request.top_k,
+        "result_count": len(results),
+        "results": results
+    }
+
 @app.post("/chat")
 def chat(request: ChatRequest):
     check_api_key()
@@ -376,53 +447,106 @@ Example JSON output:
             detail=f"DeepSeek structured output failed: {str(e)}"
         )
 
+@app.post("/ask-document-vector")
+def ask_document_vector(request: AskDocumentRequest):
+    check_api_key()
 
-AGENT_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "calculator",
-            "description": "Calculate a math expression. Use this when the user asks for arithmetic calculation.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "A math expression, for example: 23 * 19 + 7"
-                    }
-                },
-                "required": ["expression"]
-            }
+    if vector_collection.count() == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No document embeddings found. Please upload a document first."
+        )
+
+    if request.doc_id and request.doc_id not in DOCUMENT_STORE:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found."
+        )
+
+    top_results = vector_search(
+        query=request.question,
+        top_k=request.top_k,
+        doc_id=request.doc_id
+    )
+
+    if not top_results:
+        return {
+            "question": request.question,
+            "answer": "I don't know based on the uploaded documents.",
+            "citations": [],
+            "retrieved_chunks": []
         }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "word_counter",
-            "description": "Count words and characters in a given text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The text to analyze."
-                    }
+
+    context_blocks = []
+
+    for index, result in enumerate(top_results, start=1):
+        context_blocks.append(
+            f"[Source {index}] "
+            f"filename: {result['filename']}, "
+            f"chunk_index: {result['chunk_index']}\n"
+            f"{result['text']}"
+        )
+
+    context = "\n\n".join(context_blocks)
+
+    system_prompt = """
+You are a document question-answering assistant.
+
+Answer the user's question using only the provided context.
+
+Rules:
+- If the answer is not in the context, say: "I don't know based on the uploaded documents."
+- Do not use outside knowledge.
+- Keep the answer clear and concise.
+- Include citation markers like [Source 1] when using information from the context.
+"""
+
+    user_prompt = f"""
+Question:
+{request.question}
+
+Context:
+{context}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
                 },
-                "required": ["text"]
-            }
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            stream=False,
+        )
+
+        return {
+            "question": request.question,
+            "answer": response.choices[0].message.content,
+            "retrieval_method": "vector_search",
+            "citations": [
+                {
+                    "source": f"Source {index}",
+                    "doc_id": result["doc_id"],
+                    "filename": result["filename"],
+                    "chunk_index": result["chunk_index"],
+                    "distance": result["distance"]
+                }
+                for index, result in enumerate(top_results, start=1)
+            ],
+            "retrieved_chunks": top_results
         }
-    }
-]
 
-
-ALLOWED_OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-    ast.USub: operator.neg,
-}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Vector document QA failed: {str(e)}"
+        )
 
 @app.post("/study-plan")
 def create_study_plan(request: StudyPlanRequest):
@@ -455,7 +579,6 @@ def create_study_plan(request: StudyPlanRequest):
             status_code=500,
             detail=f"Study plan generation failed: {str(e)}"
         )
-
 
 @app.post("/search-document")
 def search_document(request: SearchDocumentRequest):
@@ -601,6 +724,51 @@ def run_agent(request: AgentRequest):
             detail=f"Agent failed: {str(e)}"
         )
 
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "Calculate a math expression. Use this when the user asks for arithmetic calculation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "A math expression, for example: 23 * 19 + 7"
+                    }
+                },
+                "required": ["expression"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "word_counter",
+            "description": "Count words and characters in a given text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to analyze."
+                    }
+                },
+                "required": ["text"]
+            }
+        }
+    }
+]
+
+ALLOWED_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+}
 
 def check_api_key():
     if not DEEPSEEK_API_KEY:
@@ -608,7 +776,39 @@ def check_api_key():
             status_code=500,
             detail="DEEPSEEK_API_KEY is missing. Please set it in your .env file."
         )
-    
+
+def vector_search(query: str, top_k: int = 3, doc_id: str | None = None):
+    query_embedding = embedding_model.encode([query]).tolist()
+
+    where_filter = None
+
+    if doc_id:
+        where_filter = {"doc_id": doc_id}
+
+    results = vector_collection.query(
+        query_embeddings=query_embedding,
+        n_results=top_k,
+        where=where_filter,
+        include=["documents", "metadatas", "distances"]
+    )
+
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+
+    search_results = []
+
+    for document, metadata, distance in zip(documents, metadatas, distances):
+        search_results.append({
+            "doc_id": metadata.get("doc_id"),
+            "filename": metadata.get("filename"),
+            "chunk_index": metadata.get("chunk_index"),
+            "distance": distance,
+            "text": document
+        })
+
+    return search_results
+
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
     """
     Split long text into overlapping chunks.
