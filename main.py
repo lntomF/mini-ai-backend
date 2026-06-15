@@ -30,6 +30,24 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 VECTOR_DISTANCE_THRESHOLD = 1.5
 
+RAG_EVAL_CASES = [
+    {
+        "question": "How does RAG reduce hallucination?",
+        "should_answer": True,
+        "expected_keywords": ["hallucination", "context"],
+    },
+    {
+        "question": "How can RAG avoid making things up?",
+        "should_answer": True,
+        "expected_keywords": ["context"],
+    },
+    {
+        "question": "Who is the CEO of NVIDIA?",
+        "should_answer": False,
+        "expected_keywords": [],
+    },
+]
+
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 80
 DOCUMENT_STORE = {}
@@ -723,6 +741,115 @@ def run_agent(request: AgentRequest):
             status_code=500,
             detail=f"Agent failed: {str(e)}"
         )
+    
+@app.post("/evaluate-rag")
+def evaluate_rag():
+    check_api_key()
+
+    if vector_collection.count() == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No document embeddings found. Please upload a document first."
+        )
+
+    eval_results = []
+
+    for case in RAG_EVAL_CASES:
+        question = case["question"]
+
+        top_results = vector_search(
+            query=question,
+            top_k=3
+        )
+
+        if not top_results:
+            answer = "I don't know based on the uploaded documents."
+            citations = []
+        else:
+            context_blocks = []
+
+            for index, result in enumerate(top_results, start=1):
+                context_blocks.append(
+                    f"[Source {index}] "
+                    f"filename: {result['filename']}, "
+                    f"chunk_index: {result['chunk_index']}\n"
+                    f"{result['text']}"
+                )
+
+            context = "\n\n".join(context_blocks)
+
+            system_prompt = """
+You are a document question-answering assistant.
+
+Answer the user's question using only the provided context.
+
+Rules:
+- If the answer is not in the context, say: "I don't know based on the uploaded documents."
+- Do not use outside knowledge.
+- Keep the answer clear and concise.
+- Include citation markers like [Source 1] when using information from the context.
+"""
+
+            user_prompt = f"""
+Question:
+{question}
+
+Context:
+{context}
+"""
+
+            response = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                stream=False,
+            )
+
+            answer = response.choices[0].message.content
+
+            citations = [
+                {
+                    "source": f"Source {index}",
+                    "doc_id": result["doc_id"],
+                    "filename": result["filename"],
+                    "chunk_index": result["chunk_index"],
+                    "distance": result["distance"]
+                }
+                for index, result in enumerate(top_results, start=1)
+            ]
+
+        evaluation = evaluate_answer(
+            answer=answer,
+            should_answer=case["should_answer"],
+            expected_keywords=case["expected_keywords"]
+        )
+
+        eval_results.append({
+            "question": question,
+            "should_answer": case["should_answer"],
+            "answer": answer,
+            "citations": citations,
+            "passed": evaluation["passed"],
+            "reason": evaluation["reason"]
+        })
+
+    total = len(eval_results)
+    passed = sum(1 for item in eval_results if item["passed"])
+
+    return {
+        "total_cases": total,
+        "passed_cases": passed,
+        "pass_rate": round(passed / total, 2),
+        "results": eval_results
+    }
 
 AGENT_TOOLS = [
     {
@@ -985,3 +1112,30 @@ def eval_ast_node(node):
         return ALLOWED_OPERATORS[op_type](operand)
 
     raise ValueError("Invalid expression.")
+
+def evaluate_answer(answer: str, should_answer: bool, expected_keywords: list[str]):
+    answer_lower = answer.lower()
+
+    if not should_answer:
+        passed = "i don't know" in answer_lower
+        return {
+            "passed": passed,
+            "reason": "Expected refusal answer."
+        }
+
+    missing_keywords = []
+
+    for keyword in expected_keywords:
+        if keyword.lower() not in answer_lower:
+            missing_keywords.append(keyword)
+
+    passed = len(missing_keywords) == 0
+
+    return {
+        "passed": passed,
+        "reason": (
+            "Answer contains expected keywords."
+            if passed
+            else f"Missing keywords: {missing_keywords}"
+        )
+    }
