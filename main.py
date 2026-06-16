@@ -740,7 +740,7 @@ def run_agent(request: AgentRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Agent failed: {str(e)}"
-        )
+)
     
 @app.post("/evaluate-rag")
 def evaluate_rag():
