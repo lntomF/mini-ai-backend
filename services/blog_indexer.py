@@ -30,12 +30,19 @@ def build_chunk_id(
 
 def normalize_chunks(
     raw_chunks: list[Any],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """
     将 chunker 返回的数据统一转换成：
 
     texts:
         ["chunk 内容 1", "chunk 内容 2"]
+
+    raw_texts:
+        ["原始正文 1", "原始正文 2"]
+
+    这里是有意分离的：
+    - texts 用于 embedding 和去重标识
+    - raw_texts 用于写入 Chroma，保留原始正文内容
 
     headings:
         ["章节标题 1", "章节标题 2"]
@@ -51,11 +58,13 @@ def normalize_chunks(
        }
     """
     texts: list[str] = []
+    raw_texts: list[str] = []
     headings: list[str] = []
 
     for chunk in raw_chunks:
         if isinstance(chunk, str):
             text = chunk.strip()
+            raw_text = text
             heading = ""
 
         elif isinstance(chunk, dict):
@@ -63,6 +72,14 @@ def normalize_chunks(
                 chunk.get("text")
                 or chunk.get("content")
                 or chunk.get("page_content")
+                or ""
+            ).strip()
+
+            raw_text = str(
+                chunk.get("raw_text")
+                or chunk.get("content")
+                or chunk.get("page_content")
+                or text
                 or ""
             ).strip()
 
@@ -82,30 +99,35 @@ def normalize_chunks(
             continue
 
         texts.append(text)
+        raw_texts.append(raw_text)
         headings.append(heading)
 
-    return texts, headings
+    return texts, raw_texts, headings
 
 
 def normalize_tags(tags: Any) -> list[str]:
-    """
-    将 tags 统一转换为 list[str]。
-    """
     if tags is None:
         return []
 
     if isinstance(tags, str):
-        return [tags]
+        candidates = [tags]
+    elif isinstance(tags, (list, tuple, set)):
+        candidates = tags
+    else:
+        candidates = [tags]
 
-    if isinstance(tags, list):
-        return [str(tag) for tag in tags]
+    normalized = [
+        str(tag).strip()
+        for tag in candidates
+        if tag is not None and str(tag).strip()
+    ]
 
-    return [str(tags)]
+    return list(dict.fromkeys(normalized))
 
 
 def validate_post(post: Any) -> dict[str, Any]:
     """
-    检查 Markdown 解析结果是否符合索引要求。
+    检查并标准化 Markdown 解析结果。
     """
     if not isinstance(post, dict):
         raise TypeError(
@@ -133,9 +155,31 @@ def validate_post(post: Any) -> dict[str, Any]:
             f"实际是 {type(post['content']).__name__}"
         )
 
-    post["slug"] = str(post["slug"]).strip("/")
-    post["title"] = str(post["title"])
-    post["source_path"] = str(post["source_path"])
+    if post["slug"] is None:
+        raise ValueError("文章 slug 不能为空")
+
+    if post["title"] is None:
+        raise ValueError("文章 title 不能为空")
+
+    if post["source_path"] is None:
+        raise ValueError("文章 source_path 不能为空")
+
+    slug = str(post["slug"]).strip().strip("/")
+    title = str(post["title"]).strip()
+    source_path = str(post["source_path"]).strip()
+
+    if not slug:
+        raise ValueError("文章 slug 不能为空")
+
+    if not title:
+        raise ValueError("文章 title 不能为空")
+
+    if not source_path:
+        raise ValueError("文章 source_path 不能为空")
+
+    post["slug"] = slug
+    post["title"] = title
+    post["source_path"] = source_path
     post["tags"] = normalize_tags(post.get("tags"))
 
     return post
@@ -167,7 +211,7 @@ def delete_old_blog_chunks(
         )
 
     except Exception as exc:
-        logger.exception(
+        logger.error(
             "删除文章旧向量失败，slug=%s",
             slug,
         )
@@ -191,9 +235,9 @@ def index_blog_post(
 
     1. 校验文章数据
     2. 根据 Markdown 内容切分 chunk
-    3. 删除该文章之前的旧向量
-    4. 生成 embedding
-    5. 写入 Chroma
+    3. 生成 embedding
+    4. 写入 Chroma
+    5. 清理过期的旧 chunk
     """
     post = validate_post(post)
 
@@ -207,17 +251,19 @@ def index_blog_post(
             f"实际返回了 {type(raw_chunks).__name__}"
         )
 
-    chunks, chunk_headings = normalize_chunks(
+    chunks, raw_texts, chunk_headings = normalize_chunks(
         raw_chunks
     )
 
-    # 先删除旧数据，防止修改博客后出现重复 chunk
-    delete_old_blog_chunks(
-        vector_collection=vector_collection,
-        slug=post["slug"],
-    )
+    # chunks 是 embedding/去重的稳定输入，raw_texts 是展示用的原始正文。
+    # 两者刻意分离，避免检索文本和落库文本混用。
 
     if not chunks:
+        delete_old_blog_chunks(
+            vector_collection=vector_collection,
+            slug=post["slug"],
+        )
+
         logger.info(
             "文章无可索引内容，已清理旧数据：slug=%s",
             post["slug"],
@@ -262,7 +308,7 @@ def index_blog_post(
         ).tolist()
 
     except Exception as exc:
-        logger.exception(
+        logger.error(
             "生成 embedding 失败：slug=%s",
             post["slug"],
         )
@@ -278,10 +324,42 @@ def index_blog_post(
             f"embeddings={len(embeddings)}"
         )
 
+    existing_ids: list[str] = []
+
+    try:
+        existing_chunks = vector_collection.get(
+            where={
+                "$and": [
+                    {
+                        "source_type": {
+                            "$eq": "astro_blog"
+                        }
+                    },
+                    {
+                        "slug": {
+                            "$eq": post["slug"]
+                        }
+                    },
+                ]
+            }
+        )
+
+        existing_ids = [
+            str(chunk_id)
+            for chunk_id in existing_chunks.get("ids") or []
+        ]
+
+    except Exception as exc:
+        logger.warning(
+            "读取旧向量失败，跳过旧 chunk 清理，slug=%s, error=%s",
+            post["slug"],
+            exc,
+        )
+
     try:
         vector_collection.upsert(
             ids=chunk_ids,
-            documents=chunks,
+            documents=raw_texts,
             metadatas=metadatas,
             embeddings=embeddings,
         )
@@ -295,6 +373,26 @@ def index_blog_post(
         raise RuntimeError(
             f"写入 Chroma 失败，slug={post['slug']}: {exc}"
         ) from exc
+
+    stale_ids = [
+        chunk_id
+        for chunk_id in existing_ids
+        if chunk_id not in chunk_ids
+    ]
+
+    if stale_ids:
+        try:
+            vector_collection.delete(
+                ids=stale_ids,
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "清理旧 chunk 失败，slug=%s, stale_count=%d, error=%s",
+                post["slug"],
+                len(stale_ids),
+                exc,
+            )
 
     logger.info(
         "文章索引完成：slug=%s，chunk_count=%d",

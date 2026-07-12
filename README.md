@@ -238,6 +238,15 @@ uvicorn main:app --reload
 - Embedding 生成
 - 向量化存储
 
+当前实现会先完成 embedding 和写入，再清理过期旧 chunk，避免出现“旧数据已删除但新数据写入失败”的丢失风险。
+
+另外，索引时 `chunks` 和 `raw_texts` 是刻意分开的：
+
+- `chunks`：用于 embedding、稳定 ID 生成和检索语义输入
+- `raw_texts`：用于写入 Chroma 的 `documents`，保留原始正文内容
+
+如果某篇文章切分后没有可索引内容，系统会清理该文章已有旧向量并跳过写入。
+
 请求体：无（直接 POST）
 
 返回示例：
@@ -332,6 +341,7 @@ mini-ai-backend/
   - `chunker.py`：通用的文本切分逻辑
   - `markdown_cut.py`：Markdown 文件的智能解析（提取标题、段落等结构）
 - 所有向量数据都持久化存储在 `chroma_db/`，服务重启不会丢失
+- 博客索引会在写入成功后再清理过期旧 chunk，以降低同步失败导致的数据丢失风险
 
 ## 小结
 
